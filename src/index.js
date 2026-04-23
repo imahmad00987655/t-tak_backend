@@ -25,14 +25,15 @@ const app = express();
 const PORT = Number(process.env.PORT) || 3001;
 const allowedOrigins = (process.env.CORS_ORIGINS || '')
   .split(',')
-  .map((origin) => origin.trim())
+  .map((origin) => origin.trim().replace(/\/+$/, ''))
   .filter(Boolean);
 
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+      const normalizedOrigin = origin ? origin.replace(/\/+$/, '') : origin;
+      if (!normalizedOrigin) return callback(null, true);
+      if (allowedOrigins.length === 0 || allowedOrigins.includes(normalizedOrigin)) {
         return callback(null, true);
       }
       return callback(new Error('CORS origin not allowed'));
