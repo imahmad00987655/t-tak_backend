@@ -32,6 +32,8 @@ router.post('/', async (req, res, next) => {
     const delivery = await createDelivery({
       customerId: body.customerId,
       workerId: body.workerId,
+      requireQrVerification: !!body.requireQrVerification,
+      qrToken: body.qrToken,
       status: body.status,
       paymentStatus: body.paymentStatus,
       walletDeduction: body.walletDeduction,

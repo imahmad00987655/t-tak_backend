@@ -25,6 +25,7 @@ router.post('/', async (req, res, next) => {
     const data = await recordPayment({
       customerId: body.customerId,
       amount: body.amount,
+      items: body.items,
       method: body.method,
       referenceId: body.referenceId,
       notes: body.notes,

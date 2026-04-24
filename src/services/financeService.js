@@ -146,6 +146,119 @@ export async function listPayments() {
 
 export async function recordPayment(payload) {
   if (payload.customerId === 'walk-in') {
+    if (Array.isArray(payload.items) && payload.items.length > 0) {
+      const conn = await pool.getConnection();
+      try {
+        await conn.beginTransaction();
+
+        const normalizedItems = payload.items
+          .map((item) => ({
+            productId: Number(item.productId),
+            quantity: Math.max(1, Number(item.quantity) || 1),
+            unitPrice: Number(item.unitPrice) > 0 ? Number(item.unitPrice) : null,
+          }))
+          .filter((item) => item.productId > 0);
+
+        if (!normalizedItems.length) {
+          const err = new Error('Select at least one product for walk-in billing');
+          err.status = 400;
+          throw err;
+        }
+
+        const ids = normalizedItems.map((i) => i.productId);
+        const [productRows] = await conn.query(
+          `SELECT id, name, default_price, inventory_item_id
+           FROM products
+           WHERE id IN (${ids.map(() => '?').join(',')}) AND status = 'active'`,
+          ids
+        );
+        const productMap = new Map(productRows.map((row) => [Number(row.id), row]));
+        if (productMap.size !== normalizedItems.length) {
+          const err = new Error('One or more selected products are invalid');
+          err.status = 400;
+          throw err;
+        }
+
+        let total = 0;
+        const lines = [];
+        for (const item of normalizedItems) {
+          const product = productMap.get(item.productId);
+          const price = item.unitPrice ?? Number(product.default_price);
+          const lineTotal = Number((price * item.quantity).toFixed(2));
+          total += lineTotal;
+          lines.push(`${item.quantity}x ${product.name}`);
+
+          const inventoryItemId = Number(product.inventory_item_id || 0);
+          if (!inventoryItemId) {
+            const err = new Error(`Product ${product.name} is not linked with inventory`);
+            err.status = 400;
+            throw err;
+          }
+          const [invRows] = await conn.query(
+            `SELECT id, current_stock FROM inventory_items WHERE id = :id AND status = 'active' LIMIT 1`,
+            { id: inventoryItemId }
+          );
+          if (!invRows.length) {
+            const err = new Error(`Inventory item missing for ${product.name}`);
+            err.status = 400;
+            throw err;
+          }
+          const currentStock = Number(invRows[0].current_stock || 0);
+          const nextStock = currentStock - item.quantity;
+          if (nextStock < 0) {
+            const err = new Error(`Insufficient stock for ${product.name}`);
+            err.status = 400;
+            throw err;
+          }
+          await conn.query(
+            `UPDATE inventory_items SET current_stock = :nextStock WHERE id = :id`,
+            { id: inventoryItemId, nextStock }
+          );
+          await conn.query(
+            `INSERT INTO inventory_transactions (inventory_item_id, type, quantity, notes, balance_after)
+             VALUES (:inventoryItemId, 'stock_out', :quantity, :notes, :balanceAfter)`,
+            {
+              inventoryItemId,
+              quantity: item.quantity,
+              notes: `Walk-in sale: ${payload.walkInName?.trim() || 'Walk-in Customer'}`,
+              balanceAfter: nextStock,
+            }
+          );
+        }
+
+        const finalTotal = Number(total.toFixed(2));
+        const [result] = await conn.query(
+          `INSERT INTO payments (
+             customer_id, walk_in_name, amount, method, reference_id, notes, applied_to_wallet
+           ) VALUES (
+             NULL, :walkInName, :amount, :method, :referenceId, :notes, 0
+           )`,
+          {
+            walkInName: payload.walkInName?.trim() || 'Walk-in Customer',
+            amount: finalTotal,
+            method: payload.method || 'cash',
+            referenceId: payload.referenceId?.trim() || null,
+            notes:
+              payload.notes?.trim() ||
+              `Walk-in sale (${lines.join(', ')})`,
+          }
+        );
+
+        await conn.commit();
+        await createFinanceAudit({
+          actor: payload.actor || 'Admin',
+          action: 'Walk-in sale recorded',
+          details: `${payload.walkInName || 'Walk-in Customer'} billed Rs ${finalTotal}`,
+        });
+        return { id: paymentId(Number(result.insertId)) };
+      } catch (e) {
+        await conn.rollback();
+        throw e;
+      } finally {
+        conn.release();
+      }
+    }
+
     const amount = Math.max(0, Number(payload.amount) || 0);
     if (amount <= 0) {
       const err = new Error('Payment amount must be greater than zero');
@@ -245,12 +358,24 @@ export async function getFinanceLookups() {
      WHERE status = 'active'
      ORDER BY name ASC`
   );
+  const [products] = await pool.query(
+    `SELECT id, name, default_price, status
+     FROM products
+     WHERE status = 'active'
+     ORDER BY name ASC`
+  );
   return {
     customers: customers.map((c) => ({
       id: String(c.id),
       customerId: c.customer_id,
       name: c.name,
       walletBalance: Number(c.wallet_balance),
+    })),
+    products: products.map((p) => ({
+      id: String(p.id),
+      name: p.name,
+      defaultPrice: Number(p.default_price),
+      status: p.status,
     })),
     supportsWalkIn: true,
   };

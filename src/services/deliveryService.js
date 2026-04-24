@@ -53,6 +53,14 @@ function mapDeliveryRows(rows) {
   return Array.from(map.values());
 }
 
+async function getAllowCredit(conn) {
+  const [rows] = await conn.query(
+    `SELECT setting_value FROM app_settings WHERE setting_key = 'allow_credit' LIMIT 1`
+  );
+  if (!rows.length) return true;
+  return String(rows[0].setting_value || 'true').toLowerCase() === 'true';
+}
+
 export async function listDeliveries() {
   const [rows] = await pool.query(
     `SELECT
@@ -143,7 +151,10 @@ export async function createDelivery(payload) {
     const paymentStatus = payload.paymentStatus || 'unpaid';
 
     const [customerRows] = await conn.query(
-      `SELECT id FROM customers WHERE id = :id AND status = 'active' LIMIT 1`,
+      `SELECT id, wallet_balance, qr_token
+       FROM customers
+       WHERE id = :id AND status = 'active'
+       LIMIT 1`,
       { id: customerId }
     );
     if (!customerRows.length) {
@@ -162,6 +173,16 @@ export async function createDelivery(payload) {
       throw err;
     }
 
+    if (payload.requireQrVerification) {
+      const suppliedToken = String(payload.qrToken || '').trim();
+      const customerToken = String(customerRows[0].qr_token || '').trim();
+      if (!suppliedToken || suppliedToken !== customerToken) {
+        const err = new Error('QR verification required: scan customer QR before delivery');
+        err.status = 403;
+        throw err;
+      }
+    }
+
     const normalizedItems = payload.items.map((i) => ({
       productId: Number(i.productId),
       quantity: Math.max(1, Number(i.quantity) || 1),
@@ -170,7 +191,7 @@ export async function createDelivery(payload) {
 
     const productIds = normalizedItems.map((i) => i.productId);
     const [productRows] = await conn.query(
-      `SELECT id, name, default_price FROM products
+      `SELECT id, name, default_price, inventory_item_id FROM products
        WHERE id IN (${productIds.map(() => '?').join(',')}) AND status = 'active'`,
       productIds
     );
@@ -193,9 +214,17 @@ export async function createDelivery(payload) {
       };
     });
 
-    const totalAmount = calculatedItems.reduce((sum, i) => sum + i.total, 0);
-    const walletDeduction = Math.max(0, Number(payload.walletDeduction) || 0);
-    const amountDue = paymentStatus === 'paid' ? 0 : Number(Math.max(0, totalAmount - walletDeduction).toFixed(2));
+    const totalAmount = Number(calculatedItems.reduce((sum, i) => sum + i.total, 0).toFixed(2));
+    const customerWalletBalance = Number(customerRows[0].wallet_balance || 0);
+    const allowCredit = await getAllowCredit(conn);
+    if (!allowCredit && totalAmount > customerWalletBalance) {
+      const err = new Error('Insufficient wallet balance and credit is disabled');
+      err.status = 400;
+      throw err;
+    }
+    const walletDeduction = Number(Math.min(totalAmount, customerWalletBalance).toFixed(2));
+    const amountDue = Number(Math.max(0, totalAmount - walletDeduction).toFixed(2));
+    const resolvedPaymentStatus = amountDue <= 0 ? 'paid' : walletDeduction > 0 ? 'partial' : paymentStatus;
 
     const [deliveryResult] = await conn.query(
       `INSERT INTO deliveries (
@@ -209,7 +238,7 @@ export async function createDelivery(payload) {
         customerId,
         workerId,
         status,
-        paymentStatus,
+        paymentStatus: resolvedPaymentStatus,
         walletDeduction,
         amountDue,
         totalAmount,
@@ -239,6 +268,66 @@ export async function createDelivery(payload) {
           quantity: item.quantity,
           unitPrice: item.unitPrice,
           total: item.total,
+        }
+      );
+
+      const product = productMap.get(item.productId);
+      const inventoryItemId = Number(product.inventory_item_id || 0);
+      if (!inventoryItemId) {
+        const err = new Error(`Product ${product.name} is not linked with inventory`);
+        err.status = 400;
+        throw err;
+      }
+      const [invRows] = await conn.query(
+        `SELECT id, current_stock FROM inventory_items WHERE id = :id AND status = 'active' LIMIT 1`,
+        { id: inventoryItemId }
+      );
+      if (!invRows.length) {
+        const err = new Error(`Inventory item for product ${product.name} was not found`);
+        err.status = 400;
+        throw err;
+      }
+      const currentStock = Number(invRows[0].current_stock || 0);
+      const nextStock = currentStock - item.quantity;
+      if (nextStock < 0) {
+        const err = new Error(`Insufficient inventory for ${product.name}`);
+        err.status = 400;
+        throw err;
+      }
+      await conn.query(
+        `UPDATE inventory_items SET current_stock = :nextStock WHERE id = :id`,
+        { id: inventoryItemId, nextStock }
+      );
+      await conn.query(
+        `INSERT INTO inventory_transactions (inventory_item_id, type, quantity, notes, balance_after)
+         VALUES (:inventoryItemId, 'stock_out', :quantity, :notes, :balanceAfter)`,
+        {
+          inventoryItemId,
+          quantity: item.quantity,
+          notes: `Delivery ${deliveryCode}`,
+          balanceAfter: nextStock,
+        }
+      );
+    }
+
+    if (walletDeduction > 0) {
+      const nextWalletBalance = Number((customerWalletBalance - walletDeduction).toFixed(2));
+      await conn.query(
+        `UPDATE customers SET wallet_balance = :walletBalance WHERE id = :customerId`,
+        {
+          walletBalance: nextWalletBalance,
+          customerId,
+        }
+      );
+      await conn.query(
+        `INSERT INTO wallet_transactions (customer_id, type, amount, description, reference_id, balance_after)
+         VALUES (:customerId, 'debit', :amount, :description, :referenceId, :balanceAfter)`,
+        {
+          customerId,
+          amount: walletDeduction,
+          description: `Delivery ${deliveryCode}`,
+          referenceId: deliveryCode,
+          balanceAfter: nextWalletBalance,
         }
       );
     }
