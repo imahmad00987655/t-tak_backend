@@ -17,11 +17,24 @@ export async function createAuditLog({ actor, action, details }) {
   );
 }
 
-export async function listExpenses() {
+export async function listExpenses({ from, to } = {}) {
+  const clauses = [];
+  const params = {};
+  if (from) {
+    clauses.push('expense_date >= :from');
+    params.from = from;
+  }
+  if (to) {
+    clauses.push('expense_date <= :to');
+    params.to = to;
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const [rows] = await pool.query(
     `SELECT id, category, description, amount, expense_date
      FROM expenses
-     ORDER BY expense_date DESC, id DESC`
+     ${where}
+     ORDER BY expense_date DESC, id DESC`,
+    params
   );
   return rows.map((r) => ({
     id: `E-${String(r.id).padStart(6, '0')}`,
@@ -31,6 +44,30 @@ export async function listExpenses() {
     amount: Number(r.amount),
     date: formatDate(r.expense_date),
   }));
+}
+
+export async function listExpenseCategories() {
+  const [rows] = await pool.query(
+    `SELECT id, name
+     FROM expense_categories
+     WHERE status = 'active'
+     ORDER BY name ASC`
+  );
+  return rows.map((row) => ({ id: String(row.id), name: row.name }));
+}
+
+export async function createExpenseCategory(name) {
+  const trimmed = String(name || '').trim();
+  if (!trimmed) {
+    const err = new Error('Category name is required');
+    err.status = 400;
+    throw err;
+  }
+  const [result] = await pool.query(
+    `INSERT INTO expense_categories (name, status) VALUES (:name, 'active')`,
+    { name: trimmed }
+  );
+  return { id: String(result.insertId), name: trimmed };
 }
 
 export async function createExpense(payload) {
@@ -158,17 +195,28 @@ export async function createEmployee(payload) {
   return { id: String(employeeId) };
 }
 
-export async function getReportsOverview() {
+export async function getReportsOverview({ from, to } = {}) {
+  const hasRange = !!(from && to);
+  const deliveryRangeClause = hasRange
+    ? `delivery_date BETWEEN :from AND :to`
+    : `DATE_FORMAT(delivery_date, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')`;
+  const expenseRangeClause = hasRange
+    ? `expense_date BETWEEN :from AND :to`
+    : `DATE_FORMAT(expense_date, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')`;
+  const rangeParams = hasRange ? { from, to } : {};
+
   const [monthlyRevenueRows] = await pool.query(
     `SELECT COALESCE(SUM(total_amount), 0) AS monthly_revenue
      FROM deliveries
      WHERE status IN ('delivered', 'partially_delivered')
-       AND DATE_FORMAT(delivery_date, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')`
+       AND ${deliveryRangeClause}`,
+    rangeParams
   );
   const [monthlyDeliveriesRows] = await pool.query(
     `SELECT COUNT(*) AS total_deliveries
      FROM deliveries
-     WHERE DATE_FORMAT(delivery_date, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')`
+     WHERE ${deliveryRangeClause}`,
+    rangeParams
   );
   const [duesRows] = await pool.query(
     `SELECT COALESCE(SUM(amount_due), 0) AS outstanding_dues
@@ -178,8 +226,17 @@ export async function getReportsOverview() {
   const [monthlyExpenseRows] = await pool.query(
     `SELECT COALESCE(SUM(amount), 0) AS monthly_expenses
      FROM expenses
-     WHERE DATE_FORMAT(expense_date, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')`
+     WHERE ${expenseRangeClause}`,
+    rangeParams
   );
+  const [paymentMethodRows] = await pool.query(
+    `SELECT method, COALESCE(SUM(amount), 0) AS total
+     FROM payments
+     WHERE ${hasRange ? 'DATE(created_at) BETWEEN :from AND :to' : "DATE_FORMAT(created_at, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')"}
+     GROUP BY method`,
+    rangeParams
+  );
+  const paymentMap = Object.fromEntries(paymentMethodRows.map((row) => [row.method, Number(row.total)]));
   const monthlyRevenue = Number(monthlyRevenueRows[0].monthly_revenue);
   const monthlyExpenses = Number(monthlyExpenseRows[0].monthly_expenses);
   return {
@@ -188,27 +245,39 @@ export async function getReportsOverview() {
     outstandingDues: Number(duesRows[0].outstanding_dues),
     netProfit: monthlyRevenue - monthlyExpenses,
     monthlyExpenses,
+    paymentBreakdown: {
+      cash: paymentMap.cash || 0,
+      online: paymentMap.online || 0,
+      card: paymentMap.card || 0,
+    },
   };
 }
 
-export async function getReportsCharts() {
+export async function getReportsCharts({ from, to } = {}) {
+  const hasRange = !!(from && to);
+  const condition = hasRange
+    ? `delivery_date BETWEEN :from AND :to`
+    : `delivery_date >= DATE_SUB(CURDATE(), INTERVAL 13 DAY)`;
+  const params = hasRange ? { from, to } : {};
   const [revenueRows] = await pool.query(
     `SELECT
        DATE_FORMAT(delivery_date, '%Y-%m-%d') AS day,
        COALESCE(SUM(CASE WHEN status IN ('delivered', 'partially_delivered') THEN total_amount ELSE 0 END), 0) AS revenue
      FROM deliveries
-     WHERE delivery_date >= DATE_SUB(CURDATE(), INTERVAL 13 DAY)
+     WHERE ${condition}
      GROUP BY DATE_FORMAT(delivery_date, '%Y-%m-%d')
-     ORDER BY day ASC`
+     ORDER BY day ASC`,
+    params
   );
   const [volumeRows] = await pool.query(
     `SELECT
        DATE_FORMAT(delivery_date, '%Y-%m-%d') AS day,
        COUNT(*) AS total_deliveries
      FROM deliveries
-     WHERE delivery_date >= DATE_SUB(CURDATE(), INTERVAL 13 DAY)
+     WHERE ${condition}
      GROUP BY DATE_FORMAT(delivery_date, '%Y-%m-%d')
-     ORDER BY day ASC`
+     ORDER BY day ASC`,
+    params
   );
   return {
     revenueTrend: revenueRows.map((r) => ({

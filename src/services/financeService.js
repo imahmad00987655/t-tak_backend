@@ -124,12 +124,26 @@ export async function rechargeWallet(payload) {
   }
 }
 
-export async function listPayments() {
+export async function listPayments({ from, to } = {}) {
+  const clauses = [];
+  const params = {};
+  if (from) {
+    clauses.push('DATE(p.created_at) >= :from');
+    params.from = from;
+  }
+  if (to) {
+    clauses.push('DATE(p.created_at) <= :to');
+    params.to = to;
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const [rows] = await pool.query(
     `SELECT p.id, p.customer_id, c.name AS customer_name, p.walk_in_name, p.amount, p.method, p.reference_id, p.notes, p.created_at
      FROM payments p
      LEFT JOIN customers c ON c.id = p.customer_id
+     ${where}
      ORDER BY p.created_at DESC, p.id DESC`
+    ,
+    params
   );
   return rows.map((r) => ({
     id: paymentId(Number(r.id)),
@@ -321,7 +335,18 @@ function mapInvoices(rows) {
   return Array.from(map.values());
 }
 
-export async function listInvoices() {
+export async function listInvoices({ from, to } = {}) {
+  const clauses = [`d.status IN ('delivered', 'partially_delivered')`];
+  const params = {};
+  if (from) {
+    clauses.push('d.delivery_date >= :from');
+    params.from = from;
+  }
+  if (to) {
+    clauses.push('d.delivery_date <= :to');
+    params.to = to;
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const [rows] = await pool.query(
     `SELECT
       d.id AS delivery_id,
@@ -345,8 +370,10 @@ export async function listInvoices() {
      INNER JOIN employees e ON e.id = d.worker_id
      LEFT JOIN delivery_items di ON di.delivery_id = d.id
      LEFT JOIN products p ON p.id = di.product_id
-     WHERE d.status IN ('delivered', 'partially_delivered')
+     ${where}
      ORDER BY d.delivery_date DESC, d.id DESC, di.id ASC`
+    ,
+    params
   );
   return mapInvoices(rows);
 }

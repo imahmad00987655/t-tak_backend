@@ -5,7 +5,10 @@ const router = Router();
 
 router.get('/', async (_req, res, next) => {
   try {
-    const data = await listPayments();
+    const data = await listPayments({
+      from: _req.query.from ? String(_req.query.from) : undefined,
+      to: _req.query.to ? String(_req.query.to) : undefined,
+    });
     res.json({ data });
   } catch (e) {
     next(e);

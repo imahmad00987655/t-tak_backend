@@ -18,6 +18,7 @@ import auditLogsRouter from './routes/audit-logs.routes.js';
 import dashboardsRouter from './routes/dashboards.routes.js';
 import authRouter from './routes/auth.routes.js';
 import settingsRouter from './routes/settings.routes.js';
+import returnsDamagesRouter from './routes/returns-damages.routes.js';
 
 dotenv.config();
 
@@ -64,6 +65,7 @@ app.use('/api/audit-logs', auditLogsRouter);
 app.use('/api/dashboards', dashboardsRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/settings', settingsRouter);
+app.use('/api/returns-damages', returnsDamagesRouter);
 app.use('/api/public/customer', publicCustomerRouter);
 
 app.use((err, _req, res, _next) => {
