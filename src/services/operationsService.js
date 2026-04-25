@@ -48,12 +48,15 @@ export async function listExpenses({ from, to } = {}) {
 
 export async function listExpenseCategories() {
   const [rows] = await pool.query(
-    `SELECT id, name
-     FROM expense_categories
-     WHERE status = 'active'
+    `SELECT DISTINCT name
+     FROM (
+       SELECT name FROM expense_categories WHERE status = 'active'
+       UNION
+       SELECT category AS name FROM products WHERE status = 'active' AND category IS NOT NULL AND TRIM(category) <> ''
+     ) x
      ORDER BY name ASC`
   );
-  return rows.map((row) => ({ id: String(row.id), name: row.name }));
+  return rows.map((row, idx) => ({ id: `cat-${idx + 1}`, name: row.name }));
 }
 
 export async function createExpenseCategory(name) {
@@ -193,6 +196,38 @@ export async function createEmployee(payload) {
     details: `${payload.name} (${payload.role})`,
   });
   return { id: String(employeeId) };
+}
+
+export async function updateEmployee(employeeId, payload) {
+  const id = Number(employeeId);
+  if (!id) {
+    const err = new Error('Invalid employee id');
+    err.status = 400;
+    throw err;
+  }
+  const sets = [];
+  const params = { id };
+  if (payload.status !== undefined) {
+    sets.push('status = :status');
+    params.status = payload.status === 'inactive' ? 'inactive' : 'active';
+  }
+  if (payload.assignedArea !== undefined) {
+    sets.push('assigned_area = :assignedArea');
+    params.assignedArea = payload.assignedArea ? String(payload.assignedArea).trim() : null;
+  }
+  if (!sets.length) {
+    const err = new Error('No fields to update');
+    err.status = 400;
+    throw err;
+  }
+  await pool.query(`UPDATE employees SET ${sets.join(', ')} WHERE id = :id`, params);
+  await createAuditLog({
+    actor: payload.actor || 'Admin',
+    action: 'Employee updated',
+    details: `Employee #${id} updated`,
+  });
+  const rows = await listEmployees();
+  return rows.find((r) => Number(r.id) === id) || null;
 }
 
 export async function getReportsOverview({ from, to } = {}) {

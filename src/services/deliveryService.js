@@ -101,7 +101,7 @@ export async function listDeliveries() {
 
 export async function getDeliveryLookups() {
   const [customers] = await pool.query(
-    `SELECT id, customer_id, name, area, status
+    `SELECT id, customer_id, name, area, status, wallet_balance
      FROM customers
      WHERE status = 'active'
      ORDER BY name ASC`
@@ -125,6 +125,7 @@ export async function getDeliveryLookups() {
       name: c.name,
       area: c.area,
       status: c.status,
+      walletBalance: Number(c.wallet_balance || 0),
     })),
     workers: workers.map((w) => ({
       id: String(w.id),
@@ -148,7 +149,6 @@ export async function createDelivery(payload) {
     const customerId = Number(payload.customerId);
     const workerId = Number(payload.workerId);
     const status = payload.status || 'pending';
-    const paymentStatus = payload.paymentStatus || 'unpaid';
 
     const [customerRows] = await conn.query(
       `SELECT id, wallet_balance, qr_token
@@ -215,16 +215,18 @@ export async function createDelivery(payload) {
     });
 
     const totalAmount = Number(calculatedItems.reduce((sum, i) => sum + i.total, 0).toFixed(2));
+    const advanceAmount = Number(Math.max(0, Number(payload.advanceAmount) || 0).toFixed(2));
+    const adjustedTotal = Number(Math.max(0, totalAmount - advanceAmount).toFixed(2));
     const customerWalletBalance = Number(customerRows[0].wallet_balance || 0);
     const allowCredit = await getAllowCredit(conn);
-    if (!allowCredit && totalAmount > customerWalletBalance) {
+    if (!allowCredit && adjustedTotal > customerWalletBalance) {
       const err = new Error('Insufficient wallet balance and credit is disabled');
       err.status = 400;
       throw err;
     }
-    const walletDeduction = Number(Math.min(totalAmount, customerWalletBalance).toFixed(2));
-    const amountDue = Number(Math.max(0, totalAmount - walletDeduction).toFixed(2));
-    const resolvedPaymentStatus = amountDue <= 0 ? 'paid' : walletDeduction > 0 ? 'partial' : paymentStatus;
+    const walletDeduction = Number(Math.min(adjustedTotal, customerWalletBalance).toFixed(2));
+    const amountDue = Number(Math.max(0, adjustedTotal - walletDeduction).toFixed(2));
+    const resolvedPaymentStatus = amountDue <= 0 ? 'paid' : walletDeduction > 0 ? 'partial' : 'unpaid';
 
     const [deliveryResult] = await conn.query(
       `INSERT INTO deliveries (
@@ -241,12 +243,12 @@ export async function createDelivery(payload) {
         paymentStatus: resolvedPaymentStatus,
         walletDeduction,
         amountDue,
-        totalAmount,
+        totalAmount: adjustedTotal,
         deliveryDate: payload.deliveryDate,
         deliveryTime: payload.deliveryTime || null,
         periodStartDate: payload.periodStartDate || null,
         periodEndDate: payload.periodEndDate || null,
-        advanceAmount: Math.max(0, Number(payload.advanceAmount) || 0),
+        advanceAmount,
         notes: payload.notes?.trim() || null,
       }
     );
@@ -377,4 +379,39 @@ export async function createDelivery(payload) {
   } finally {
     conn.release();
   }
+}
+
+export async function updateDelivery(deliveryId, payload) {
+  const id = Number(deliveryId);
+  if (!id) {
+    const err = new Error('Invalid delivery id');
+    err.status = 400;
+    throw err;
+  }
+  const sets = [];
+  const params = { id };
+  if (payload.status !== undefined) {
+    sets.push('status = :status');
+    params.status = payload.status;
+  }
+  if (payload.notes !== undefined) {
+    sets.push('notes = :notes');
+    params.notes = payload.notes ? String(payload.notes).trim() : null;
+  }
+  if (payload.deliveryDate !== undefined) {
+    sets.push('delivery_date = :deliveryDate');
+    params.deliveryDate = payload.deliveryDate || null;
+  }
+  if (payload.workerId !== undefined) {
+    sets.push('worker_id = :workerId');
+    params.workerId = Number(payload.workerId);
+  }
+  if (!sets.length) {
+    const err = new Error('No updatable fields provided');
+    err.status = 400;
+    throw err;
+  }
+  await pool.query(`UPDATE deliveries SET ${sets.join(', ')} WHERE id = :id`, params);
+  const data = await listDeliveries();
+  return data.find((d) => Number(d.dbId) === id) || null;
 }

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { createDelivery, listDeliveries } from '../services/deliveryService.js';
+import { createDelivery, listDeliveries, updateDelivery } from '../services/deliveryService.js';
 
 const router = Router();
 
@@ -46,6 +46,22 @@ router.post('/', async (req, res, next) => {
       items: body.items,
     });
     res.status(201).json({ data: delivery });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.patch('/:id', async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const data = await updateDelivery(req.params.id, {
+      status: body.status,
+      notes: body.notes,
+      deliveryDate: body.deliveryDate,
+      workerId: body.workerId,
+    });
+    if (!data) return res.status(404).json({ error: 'Delivery not found' });
+    res.json({ data });
   } catch (e) {
     next(e);
   }

@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { getDeliveryLookups } from '../services/deliveryService.js';
-import { listInventoryItems } from '../services/inventoryService.js';
-import { getActiveWorkers, getRouteAreaLookups } from '../services/routeService.js';
+import { listInventoryFormItems } from '../services/inventoryService.js';
+import { getActiveWorkers, getCustomerFormLookups, getRouteAreaLookups } from '../services/routeService.js';
 import { getFinanceLookups } from '../services/financeService.js';
 
 const router = Router();
@@ -26,7 +26,7 @@ router.get('/routes-form', async (_req, res, next) => {
 
 router.get('/inventory-form', async (_req, res, next) => {
   try {
-    const items = await listInventoryItems();
+    const items = await listInventoryFormItems();
     res.json({ data: { items } });
   } catch (e) {
     next(e);
@@ -45,6 +45,15 @@ router.get('/finance-form', async (_req, res, next) => {
 router.get('/employee-form', async (_req, res, next) => {
   try {
     const data = await getRouteAreaLookups();
+    res.json({ data });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.get('/customer-form', async (_req, res, next) => {
+  try {
+    const data = await getCustomerFormLookups();
     res.json({ data });
   } catch (e) {
     next(e);

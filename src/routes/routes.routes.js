@@ -24,6 +24,7 @@ router.post('/', async (req, res, next) => {
     const route = await createRoute({
       name: body.name,
       area: body.area,
+      zone: body.zone,
       workerIds: body.workerIds || [],
     });
     res.status(201).json({ data: route });

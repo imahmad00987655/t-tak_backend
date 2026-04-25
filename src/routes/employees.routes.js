@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { createEmployee, listEmployees } from '../services/operationsService.js';
+import { createEmployee, listEmployees, updateEmployee } from '../services/operationsService.js';
 
 const router = Router();
 
@@ -38,6 +38,21 @@ router.post('/', async (req, res, next) => {
       actor: body.actor || 'Admin',
     });
     res.status(201).json({ data });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.patch('/:id', async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const data = await updateEmployee(req.params.id, {
+      status: body.status,
+      assignedArea: body.assignedArea,
+      actor: body.actor || 'Admin',
+    });
+    if (!data) return res.status(404).json({ error: 'Employee not found' });
+    res.json({ data });
   } catch (e) {
     next(e);
   }

@@ -29,6 +29,25 @@ export async function listInventoryItems() {
   return rows.map(mapItem);
 }
 
+export async function listInventoryFormItems() {
+  const [rows] = await pool.query(
+    `SELECT DISTINCT
+       ii.id,
+       p.name,
+       p.category,
+       p.unit,
+       ii.current_stock,
+       ii.min_stock_level,
+       ii.unit_cost,
+       ii.last_restocked
+     FROM products p
+     INNER JOIN inventory_items ii ON ii.id = p.inventory_item_id
+     WHERE p.status = 'active' AND ii.status = 'active'
+     ORDER BY p.name ASC`
+  );
+  return rows.map(mapItem);
+}
+
 export async function recordInventoryTransaction(payload) {
   const itemId = Number(payload.itemId);
   const qty = Math.max(1, Number(payload.quantity) || 1);

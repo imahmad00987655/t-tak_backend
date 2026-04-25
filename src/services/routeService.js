@@ -8,6 +8,7 @@ function mapRouteRows(rows) {
         id: String(row.id),
         name: row.name,
         area: row.area,
+        zone: row.zone || '',
         customerCount: Number(row.customer_count || 0),
         assignedWorkers: [],
         workerNames: [],
@@ -27,6 +28,7 @@ export async function listRoutes() {
       r.id,
       r.name,
       r.area,
+      r.zone,
       (
         SELECT COUNT(*)
         FROM customers c
@@ -52,11 +54,12 @@ export async function createRoute(payload) {
   try {
     await conn.beginTransaction();
     const [result] = await conn.query(
-      `INSERT INTO routes (name, area, status)
-       VALUES (:name, :area, 'active')`,
+      `INSERT INTO routes (name, area, zone, status)
+       VALUES (:name, :area, :zone, 'active')`,
       {
         name: payload.name.trim(),
         area: payload.area.trim(),
+        zone: payload.zone?.trim() || '',
       }
     );
     const routeId = Number(result.insertId);
@@ -100,18 +103,45 @@ export async function getActiveWorkers() {
 
 export async function getRouteAreaLookups() {
   const [rows] = await pool.query(
-    `SELECT id, name, area
+    `SELECT id, name, area, zone
      FROM routes
      WHERE status = 'active'
-     ORDER BY area ASC, name ASC`
+     ORDER BY area ASC, zone ASC, name ASC`
   );
   const areas = Array.from(new Set(rows.map((r) => r.area).filter(Boolean)));
+  const zones = Array.from(new Set(rows.map((r) => r.zone).filter(Boolean)));
   return {
     areas,
+    zones,
     routes: rows.map((r) => ({
       id: String(r.id),
       name: r.name,
       area: r.area,
+      zone: r.zone || '',
     })),
+  };
+}
+
+export async function getCustomerFormLookups() {
+  const [rows] = await pool.query(
+    `SELECT name, area, zone
+     FROM routes
+     WHERE status = 'active'
+     ORDER BY area ASC, zone ASC, name ASC`
+  );
+  const [workers] = await pool.query(
+    `SELECT id, name
+     FROM employees
+     WHERE role = 'field_worker' AND status = 'active'
+     ORDER BY name ASC`
+  );
+  const areas = Array.from(new Set(rows.map((r) => r.area).filter(Boolean)));
+  const zones = Array.from(new Set(rows.map((r) => r.zone).filter(Boolean)));
+  const routes = rows.map((r) => r.name).filter(Boolean);
+  return {
+    areas,
+    zones,
+    routes: Array.from(new Set(routes)),
+    workers: workers.map((w) => ({ id: String(w.id), name: w.name })),
   };
 }
