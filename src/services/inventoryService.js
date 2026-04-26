@@ -124,3 +124,52 @@ export async function recordInventoryTransaction(payload) {
   );
   return mapItem(rows[0]);
 }
+
+export async function updateInventoryItem(itemId, payload) {
+  const id = Number(itemId);
+  if (!id) {
+    const err = new Error('Invalid inventory item id');
+    err.status = 400;
+    throw err;
+  }
+  const sets = [];
+  const params = { id };
+  if (payload.name !== undefined) {
+    sets.push('name = :name');
+    params.name = String(payload.name).trim();
+  }
+  if (payload.category !== undefined) {
+    sets.push('category = :category');
+    params.category = String(payload.category).trim();
+  }
+  if (payload.unit !== undefined) {
+    sets.push('unit = :unit');
+    params.unit = String(payload.unit).trim();
+  }
+  if (payload.minStockLevel !== undefined) {
+    sets.push('min_stock_level = :minStockLevel');
+    params.minStockLevel = Math.max(0, Number(payload.minStockLevel) || 0);
+  }
+  if (payload.unitCost !== undefined) {
+    sets.push('unit_cost = :unitCost');
+    params.unitCost = Math.max(0, Number(payload.unitCost) || 0);
+  }
+  if (payload.status !== undefined) {
+    sets.push('status = :status');
+    params.status = payload.status === 'inactive' ? 'inactive' : 'active';
+  }
+  if (!sets.length) {
+    const err = new Error('No updatable fields provided');
+    err.status = 400;
+    throw err;
+  }
+  await pool.query(`UPDATE inventory_items SET ${sets.join(', ')} WHERE id = :id`, params);
+  const [rows] = await pool.query(
+    `SELECT id, name, category, unit, current_stock, min_stock_level, unit_cost, last_restocked
+     FROM inventory_items
+     WHERE id = :id`,
+    { id }
+  );
+  if (!rows.length) return null;
+  return mapItem(rows[0]);
+}

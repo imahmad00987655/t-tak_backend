@@ -47,8 +47,16 @@ router.patch('/:id', async (req, res, next) => {
   try {
     const body = req.body || {};
     const data = await updateEmployee(req.params.id, {
+      name: body.name,
+      phone: body.phone,
+      email: body.email,
+      role: body.role,
       status: body.status,
       assignedArea: body.assignedArea,
+      assignedRoute: body.assignedRoute,
+      loginPhone: body.loginPhone,
+      loginEmail: body.loginEmail,
+      loginPassword: body.loginPassword,
       actor: body.actor || 'Admin',
     });
     if (!data) return res.status(404).json({ error: 'Employee not found' });

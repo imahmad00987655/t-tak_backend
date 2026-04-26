@@ -205,22 +205,120 @@ export async function updateEmployee(employeeId, payload) {
     err.status = 400;
     throw err;
   }
-  const sets = [];
-  const params = { id };
-  if (payload.status !== undefined) {
-    sets.push('status = :status');
-    params.status = payload.status === 'inactive' ? 'inactive' : 'active';
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const sets = [];
+    const params = { id };
+    if (payload.name !== undefined) {
+      sets.push('name = :name');
+      params.name = String(payload.name).trim();
+    }
+    if (payload.phone !== undefined) {
+      sets.push('phone = :phone');
+      params.phone = String(payload.phone).trim();
+    }
+    if (payload.email !== undefined) {
+      sets.push('email = :email');
+      params.email = payload.email ? String(payload.email).trim() : null;
+    }
+    if (payload.role !== undefined) {
+      sets.push('role = :role');
+      params.role = payload.role;
+    }
+    if (payload.status !== undefined) {
+      sets.push('status = :status');
+      params.status = payload.status === 'inactive' ? 'inactive' : 'active';
+    }
+    if (payload.assignedArea !== undefined) {
+      sets.push('assigned_area = :assignedArea');
+      params.assignedArea = payload.assignedArea ? String(payload.assignedArea).trim() : null;
+    }
+    if (!sets.length && payload.assignedRoute === undefined && payload.loginPhone === undefined && payload.loginEmail === undefined && payload.loginPassword === undefined) {
+      const err = new Error('No fields to update');
+      err.status = 400;
+      throw err;
+    }
+    if (sets.length) {
+      await conn.query(`UPDATE employees SET ${sets.join(', ')} WHERE id = :id`, params);
+    }
+    if (payload.assignedRoute !== undefined) {
+      await conn.query(`DELETE FROM route_workers WHERE worker_id = :workerId`, { workerId: id });
+      const routeNames = String(payload.assignedRoute || '')
+        .split(',')
+        .map((x) => x.trim())
+        .filter(Boolean);
+      if (routeNames.length > 0) {
+        const [routeRows] = await conn.query(
+          `SELECT id FROM routes WHERE name IN (${routeNames.map(() => '?').join(',')})`,
+          routeNames
+        );
+        for (const row of routeRows) {
+          await conn.query(
+            `INSERT IGNORE INTO route_workers (route_id, worker_id) VALUES (:routeId, :workerId)`,
+            { routeId: Number(row.id), workerId: id }
+          );
+        }
+      }
+    }
+    if (payload.loginPhone !== undefined || payload.loginEmail !== undefined || payload.loginPassword !== undefined) {
+      const [userRows] = await conn.query(
+        `SELECT id, phone, email FROM users WHERE employee_id = :employeeId LIMIT 1`,
+        { employeeId: id }
+      );
+      const [employeeRows] = await conn.query(
+        `SELECT name, phone, email, role, status FROM employees WHERE id = :id LIMIT 1`,
+        { id }
+      );
+      if (!employeeRows.length) {
+        const err = new Error('Employee not found');
+        err.status = 404;
+        throw err;
+      }
+      const employee = employeeRows[0];
+      const resolvedPhone = payload.loginPhone?.trim() || employee.phone;
+      const resolvedEmail =
+        payload.loginEmail?.trim().toLowerCase() ||
+        employee.email?.trim().toLowerCase() ||
+        `employee${id}@local.tiktakwater`;
+      if (userRows.length) {
+        const userSets = ['phone = :phone', 'email = :email', 'name = :name', 'role = :role', 'status = :status'];
+        const userParams = {
+          id: Number(userRows[0].id),
+          phone: resolvedPhone,
+          email: resolvedEmail,
+          name: employee.name,
+          role: employee.role,
+          status: employee.status,
+        };
+        if (payload.loginPassword && payload.loginPassword.trim()) {
+          userSets.push('password_hash = :passwordHash');
+          userParams.passwordHash = payload.loginPassword.trim();
+        }
+        await conn.query(`UPDATE users SET ${userSets.join(', ')} WHERE id = :id`, userParams);
+      } else {
+        await conn.query(
+          `INSERT INTO users (name, email, phone, password_hash, role, status, employee_id)
+           VALUES (:name, :email, :phone, :passwordHash, :role, :status, :employeeId)`,
+          {
+            name: employee.name,
+            email: resolvedEmail,
+            phone: resolvedPhone,
+            passwordHash: payload.loginPassword?.trim() || '1234',
+            role: employee.role,
+            status: employee.status,
+            employeeId: id,
+          }
+        );
+      }
+    }
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
   }
-  if (payload.assignedArea !== undefined) {
-    sets.push('assigned_area = :assignedArea');
-    params.assignedArea = payload.assignedArea ? String(payload.assignedArea).trim() : null;
-  }
-  if (!sets.length) {
-    const err = new Error('No fields to update');
-    err.status = 400;
-    throw err;
-  }
-  await pool.query(`UPDATE employees SET ${sets.join(', ')} WHERE id = :id`, params);
   await createAuditLog({
     actor: payload.actor || 'Admin',
     action: 'Employee updated',

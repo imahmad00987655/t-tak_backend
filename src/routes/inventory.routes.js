@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { listInventoryItems, recordInventoryTransaction } from '../services/inventoryService.js';
+import { listInventoryItems, recordInventoryTransaction, updateInventoryItem } from '../services/inventoryService.js';
 
 const router = Router();
 
@@ -28,6 +28,24 @@ router.post('/transactions', async (req, res, next) => {
       notes: body.notes,
     });
     res.status(201).json({ data: item });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.patch('/items/:id', async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const data = await updateInventoryItem(req.params.id, {
+      name: body.name,
+      category: body.category,
+      unit: body.unit,
+      minStockLevel: body.minStockLevel,
+      unitCost: body.unitCost,
+      status: body.status,
+    });
+    if (!data) return res.status(404).json({ error: 'Inventory item not found' });
+    res.json({ data });
   } catch (e) {
     next(e);
   }
