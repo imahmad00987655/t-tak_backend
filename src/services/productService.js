@@ -23,27 +23,75 @@ export async function listProducts() {
 }
 
 export async function createProduct(payload) {
-  const [result] = await pool.query(
-    `INSERT INTO products (
-      name, description, unit, default_price, category, status, stock_quantity
-    ) VALUES (
-      :name, :description, :unit, :defaultPrice, :category, :status, :stockQuantity
-    )`,
-    {
-      name: payload.name.trim(),
-      description: payload.description?.trim() || null,
-      unit: payload.unit,
-      defaultPrice: Math.max(0, Number(payload.defaultPrice) || 0),
-      category: payload.category.trim(),
-      status: payload.status || 'active',
-      stockQuantity: Math.max(0, Number(payload.stockQuantity) || 0),
-    }
-  );
+  const name = payload.name.trim();
+  const description = payload.description?.trim() || null;
+  const unit = payload.unit;
+  const defaultPrice = Math.max(0, Number(payload.defaultPrice) || 0);
+  const category = payload.category.trim();
+  const status = payload.status || 'active';
+  const stockQuantity = Math.max(0, Number(payload.stockQuantity) || 0);
+
+  const conn = await pool.getConnection();
+  let productId;
+  try {
+    await conn.beginTransaction();
+
+    const [result] = await conn.query(
+      `INSERT INTO products (
+        name, description, unit, default_price, category, status, stock_quantity
+      ) VALUES (
+        :name, :description, :unit, :defaultPrice, :category, :status, :stockQuantity
+      )`,
+      {
+        name,
+        description,
+        unit,
+        defaultPrice,
+        category,
+        status,
+        stockQuantity,
+      }
+    );
+    productId = Number(result.insertId);
+
+    const [inventoryInsert] = await conn.query(
+      `INSERT INTO inventory_items (
+        name, category, unit, current_stock, min_stock_level, unit_cost, status
+      ) VALUES (
+        :name, :category, :unit, :currentStock, 0, :unitCost, :status
+      )`,
+      {
+        name,
+        category,
+        unit,
+        currentStock: stockQuantity,
+        unitCost: defaultPrice,
+        status: status === 'inactive' ? 'inactive' : 'active',
+      }
+    );
+
+    await conn.query(
+      `UPDATE products
+       SET inventory_item_id = :inventoryItemId
+       WHERE id = :productId`,
+      {
+        inventoryItemId: Number(inventoryInsert.insertId),
+        productId,
+      }
+    );
+
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
 
   const [rows] = await pool.query(
     `SELECT id, name, description, unit, default_price, category, status, stock_quantity
      FROM products WHERE id = :id`,
-    { id: Number(result.insertId) }
+    { id: productId }
   );
   return mapProduct(rows[0]);
 }

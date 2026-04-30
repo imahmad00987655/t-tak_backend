@@ -19,6 +19,52 @@ function mapItem(row) {
   };
 }
 
+async function ensureProductInventoryLinks() {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [products] = await conn.query(
+      `SELECT id, name, category, unit, default_price, stock_quantity, status
+       FROM products
+       WHERE inventory_item_id IS NULL`
+    );
+
+    for (const product of products) {
+      const [inventoryInsert] = await conn.query(
+        `INSERT INTO inventory_items (
+           name, category, unit, current_stock, min_stock_level, unit_cost, status
+         ) VALUES (
+           :name, :category, :unit, :currentStock, 0, :unitCost, :status
+         )`,
+        {
+          name: product.name,
+          category: product.category || '',
+          unit: product.unit || 'piece',
+          currentStock: Math.max(0, Number(product.stock_quantity) || 0),
+          unitCost: Math.max(0, Number(product.default_price) || 0),
+          status: product.status === 'inactive' ? 'inactive' : 'active',
+        }
+      );
+
+      await conn.query(
+        `UPDATE products
+         SET inventory_item_id = :inventoryItemId
+         WHERE id = :productId`,
+        {
+          inventoryItemId: Number(inventoryInsert.insertId),
+          productId: Number(product.id),
+        }
+      );
+    }
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
 export async function listInventoryItems() {
   const [rows] = await pool.query(
     `SELECT id, name, category, unit, current_stock, min_stock_level, unit_cost, last_restocked
@@ -30,6 +76,7 @@ export async function listInventoryItems() {
 }
 
 export async function listInventoryFormItems() {
+  await ensureProductInventoryLinks();
   const [rows] = await pool.query(
     `SELECT DISTINCT
        ii.id,
