@@ -24,22 +24,33 @@ dotenv.config();
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3001;
-const allowedOrigins = (process.env.CORS_ORIGINS || '')
+const defaultAllowedOrigins = ['https://portal.t-tok.com'];
+const allowedOrigins = [...defaultAllowedOrigins, ...(process.env.CORS_ORIGINS || '')
   .split(',')
   .map((origin) => origin.trim().replace(/\/+$/, ''))
-  .filter(Boolean);
+  .filter(Boolean)];
 
 app.use(
   cors({
     origin(origin, callback) {
       const normalizedOrigin = origin ? origin.replace(/\/+$/, '') : origin;
       if (!normalizedOrigin) return callback(null, true);
-      if (allowedOrigins.length === 0 || allowedOrigins.includes(normalizedOrigin)) {
+      const isAllowedByWildcard = allowedOrigins.some((allowedOrigin) => {
+        if (!allowedOrigin.startsWith('*.')) return false;
+        const suffix = allowedOrigin.slice(1).toLowerCase();
+        return normalizedOrigin.toLowerCase().endsWith(suffix);
+      });
+      if (
+        allowedOrigins.length === 0 ||
+        allowedOrigins.includes(normalizedOrigin) ||
+        isAllowedByWildcard
+      ) {
         return callback(null, true);
       }
       return callback(new Error('CORS origin not allowed'));
     },
     credentials: true,
+    optionsSuccessStatus: 204,
   })
 );
 app.use(express.json({ limit: '1mb' }));
