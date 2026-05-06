@@ -1,5 +1,10 @@
 import { Router } from 'express';
-import { getInactiveCustomersReport, getReportsCharts, getReportsOverview } from '../services/operationsService.js';
+import {
+  getInactiveCustomersReport,
+  getReportsCharts,
+  getReportsDetailed,
+  getReportsOverview,
+} from '../services/operationsService.js';
 
 const router = Router();
 
@@ -33,6 +38,22 @@ router.get('/inactive-customers', async (_req, res, next) => {
       from: _req.query.from ? String(_req.query.from) : undefined,
       to: _req.query.to ? String(_req.query.to) : undefined,
       walkInGapDays: _req.query.walkInGapDays ? Number(_req.query.walkInGapDays) : undefined,
+    });
+    res.json({ data });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.get('/details', async (_req, res, next) => {
+  try {
+    const data = await getReportsDetailed({
+      from: _req.query.from ? String(_req.query.from) : undefined,
+      to: _req.query.to ? String(_req.query.to) : undefined,
+      customerId: _req.query.customerId ? String(_req.query.customerId) : undefined,
+      productId: _req.query.productId ? String(_req.query.productId) : undefined,
+      workerId: _req.query.workerId ? String(_req.query.workerId) : undefined,
+      paymentMethod: _req.query.paymentMethod ? String(_req.query.paymentMethod) : undefined,
     });
     res.json({ data });
   } catch (e) {

@@ -424,6 +424,127 @@ export async function getReportsCharts({ from, to } = {}) {
   };
 }
 
+export async function getReportsDetailed({ from, to, customerId, productId, workerId, paymentMethod } = {}) {
+  const clauses = [`d.status IN ('delivered', 'partially_delivered')`];
+  const params = {};
+  if (from) {
+    clauses.push('d.delivery_date >= :from');
+    params.from = from;
+  }
+  if (to) {
+    clauses.push('d.delivery_date <= :to');
+    params.to = to;
+  }
+  if (customerId) {
+    clauses.push('d.customer_id = :customerId');
+    params.customerId = Number(customerId);
+  }
+  if (workerId) {
+    clauses.push('d.worker_id = :workerId');
+    params.workerId = Number(workerId);
+  }
+  if (productId) {
+    clauses.push('EXISTS (SELECT 1 FROM delivery_items di WHERE di.delivery_id = d.id AND di.product_id = :productId)');
+    params.productId = Number(productId);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+
+  const [customerRows] = await pool.query(
+    `SELECT
+       c.id,
+       c.customer_id,
+       c.name,
+       COUNT(d.id) AS deliveries_count,
+       COALESCE(SUM(d.total_amount), 0) AS total_revenue
+     FROM deliveries d
+     INNER JOIN customers c ON c.id = d.customer_id
+     ${where}
+     GROUP BY c.id, c.customer_id, c.name
+     ORDER BY total_revenue DESC`,
+    params
+  );
+
+  const [productRows] = await pool.query(
+    `SELECT
+       p.id,
+       p.name,
+       COALESCE(SUM(di.quantity), 0) AS qty_sold,
+       COALESCE(SUM(di.total), 0) AS revenue
+     FROM deliveries d
+     INNER JOIN delivery_items di ON di.delivery_id = d.id
+     INNER JOIN products p ON p.id = di.product_id
+     ${where}
+     GROUP BY p.id, p.name
+     ORDER BY revenue DESC`,
+    params
+  );
+
+  const [workerRows] = await pool.query(
+    `SELECT
+       e.id,
+       e.name,
+       COUNT(d.id) AS deliveries_count,
+       COALESCE(SUM(d.total_amount), 0) AS revenue
+     FROM deliveries d
+     INNER JOIN employees e ON e.id = d.worker_id
+     ${where}
+     GROUP BY e.id, e.name
+     ORDER BY deliveries_count DESC`,
+    params
+  );
+
+  const payClauses = [];
+  const payParams = {};
+  if (from) {
+    payClauses.push('DATE(created_at) >= :from');
+    payParams.from = from;
+  }
+  if (to) {
+    payClauses.push('DATE(created_at) <= :to');
+    payParams.to = to;
+  }
+  if (paymentMethod) {
+    payClauses.push('method = :paymentMethod');
+    payParams.paymentMethod = paymentMethod;
+  }
+  const payWhere = payClauses.length ? `WHERE ${payClauses.join(' AND ')}` : '';
+  const [paymentRows] = await pool.query(
+    `SELECT method, COALESCE(SUM(amount), 0) AS total_amount, COUNT(*) AS total_count
+     FROM payments
+     ${payWhere}
+     GROUP BY method
+     ORDER BY total_amount DESC`,
+    payParams
+  );
+
+  return {
+    customerReport: customerRows.map((row) => ({
+      id: String(row.id),
+      customerId: row.customer_id,
+      name: row.name,
+      deliveries: Number(row.deliveries_count || 0),
+      revenue: Number(row.total_revenue || 0),
+    })),
+    productReport: productRows.map((row) => ({
+      id: String(row.id),
+      name: row.name,
+      quantitySold: Number(row.qty_sold || 0),
+      revenue: Number(row.revenue || 0),
+    })),
+    workerPerformance: workerRows.map((row) => ({
+      id: String(row.id),
+      name: row.name,
+      deliveries: Number(row.deliveries_count || 0),
+      revenue: Number(row.revenue || 0),
+    })),
+    paymentMethods: paymentRows.map((row) => ({
+      method: row.method,
+      totalAmount: Number(row.total_amount || 0),
+      totalCount: Number(row.total_count || 0),
+    })),
+  };
+}
+
 export async function getInactiveCustomersReport({ from, to, walkInGapDays } = {}) {
   const now = new Date();
   const monthStart = (from && from.length >= 7) ? `${from.slice(0, 7)}-01` : `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
@@ -440,7 +561,26 @@ export async function getInactiveCustomersReport({ from, to, walkInGapDays } = {
        c.name,
        c.phone,
        c.area,
-       MAX(prev.delivery_date) AS last_order_date
+       MAX(prev.delivery_date) AS last_order_date,
+       COALESCE((
+         SELECT SUM(d2.total_amount)
+         FROM deliveries d2
+         WHERE d2.customer_id = c.id AND d2.status IN ('delivered', 'partially_delivered')
+       ), 0) AS lifetime_value,
+       COALESCE((
+         SELECT COUNT(*)
+         FROM deliveries d3
+         WHERE d3.customer_id = c.id
+           AND d3.status IN ('delivered', 'partially_delivered')
+           AND d3.delivery_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+       ), 0) AS orders_last_30,
+       COALESCE((
+         SELECT COUNT(*)
+         FROM deliveries d4
+         WHERE d4.customer_id = c.id
+           AND d4.status IN ('delivered', 'partially_delivered')
+           AND d4.delivery_date BETWEEN DATE_SUB(CURDATE(), INTERVAL 60 DAY) AND DATE_SUB(CURDATE(), INTERVAL 31 DAY)
+       ), 0) AS orders_prev_30
      FROM customers c
      INNER JOIN deliveries prev
        ON prev.customer_id = c.id
@@ -479,14 +619,24 @@ export async function getInactiveCustomersReport({ from, to, walkInGapDays } = {
 
   return {
     period: { previousMonth: prevMonth, currentMonth },
-    inactiveRegisteredCustomers: inactiveRows.map((row) => ({
-      id: String(row.id),
-      customerId: row.customer_id,
-      name: row.name,
-      phone: row.phone || '',
-      area: row.area || '',
-      lastOrderDate: formatDate(row.last_order_date),
-    })),
+    inactiveRegisteredCustomers: inactiveRows.map((row) => {
+      const ordersLast30 = Number(row.orders_last_30 || 0);
+      const ordersPrev30 = Number(row.orders_prev_30 || 0);
+      const trend =
+        ordersLast30 < ordersPrev30 ? 'declining' : ordersLast30 === ordersPrev30 ? 'stable' : 'growing';
+      const tag = ordersLast30 === 0 ? 'inactive' : trend === 'declining' ? 'at_risk' : 'active';
+      return {
+        id: String(row.id),
+        customerId: row.customer_id,
+        name: row.name,
+        phone: row.phone || '',
+        area: row.area || '',
+        lastOrderDate: formatDate(row.last_order_date),
+        purchaseFrequencyTrend: trend,
+        lifetimeValue: Number(row.lifetime_value || 0),
+        tag,
+      };
+    }),
     inactiveWalkIns: walkInRows.map((row) => ({
       name: row.walk_in_name,
       firstSeen: formatDate(row.first_seen),
@@ -494,6 +644,7 @@ export async function getInactiveCustomersReport({ from, to, walkInGapDays } = {
       activeDays: Number(row.active_days || 0),
       totalAmount: Number(row.total_amount || 0),
       daysSinceLast: Number(row.days_since_last || 0),
+      tag: Number(row.days_since_last || 0) >= 30 ? 'lost_customer' : 'inactive',
     })),
   };
 }
