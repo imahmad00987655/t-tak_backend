@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getReportsCharts, getReportsOverview } from '../services/operationsService.js';
+import { getInactiveCustomersReport, getReportsCharts, getReportsOverview } from '../services/operationsService.js';
 
 const router = Router();
 
@@ -20,6 +20,19 @@ router.get('/charts', async (_req, res, next) => {
     const data = await getReportsCharts({
       from: _req.query.from ? String(_req.query.from) : undefined,
       to: _req.query.to ? String(_req.query.to) : undefined,
+    });
+    res.json({ data });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.get('/inactive-customers', async (_req, res, next) => {
+  try {
+    const data = await getInactiveCustomersReport({
+      from: _req.query.from ? String(_req.query.from) : undefined,
+      to: _req.query.to ? String(_req.query.to) : undefined,
+      walkInGapDays: _req.query.walkInGapDays ? Number(_req.query.walkInGapDays) : undefined,
     });
     res.json({ data });
   } catch (e) {

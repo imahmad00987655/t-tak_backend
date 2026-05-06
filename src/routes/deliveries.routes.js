@@ -1,5 +1,11 @@
 import { Router } from 'express';
-import { createDelivery, listDeliveries, updateDelivery } from '../services/deliveryService.js';
+import {
+  completeDeliveryWithRuntime,
+  createDelivery,
+  getWorkerAssignedDelivery,
+  listDeliveries,
+  updateDelivery,
+} from '../services/deliveryService.js';
 
 const router = Router();
 
@@ -59,6 +65,38 @@ router.patch('/:id', async (req, res, next) => {
       notes: body.notes,
       deliveryDate: body.deliveryDate,
       workerId: body.workerId,
+    });
+    if (!data) return res.status(404).json({ error: 'Delivery not found' });
+    res.json({ data });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.get('/worker-assigned', async (req, res, next) => {
+  try {
+    const customerId = req.query.customerId ? String(req.query.customerId) : '';
+    const workerId = req.query.workerId ? String(req.query.workerId) : '';
+    if (!customerId || !workerId) {
+      return res.status(400).json({ error: 'Missing customerId or workerId' });
+    }
+    const data = await getWorkerAssignedDelivery({ customerId, workerId });
+    res.json({ data });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.post('/:id/runtime-complete', async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const data = await completeDeliveryWithRuntime(req.params.id, {
+      extraItems: body.extraItems,
+      paymentReceivedAmount: body.paymentReceivedAmount,
+      paymentMethod: body.paymentMethod,
+      referenceId: body.referenceId,
+      paymentNotes: body.paymentNotes,
+      notes: body.notes,
     });
     if (!data) return res.status(404).json({ error: 'Delivery not found' });
     res.json({ data });

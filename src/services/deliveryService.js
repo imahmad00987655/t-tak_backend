@@ -415,3 +415,237 @@ export async function updateDelivery(deliveryId, payload) {
   const data = await listDeliveries();
   return data.find((d) => Number(d.dbId) === id) || null;
 }
+
+export async function getWorkerAssignedDelivery({ customerId, workerId }) {
+  const cid = Number(customerId);
+  const wid = Number(workerId);
+  if (!cid || !wid) {
+    const err = new Error('Invalid customer or worker id');
+    err.status = 400;
+    throw err;
+  }
+
+  const [rows] = await pool.query(
+    `SELECT
+      d.id,
+      d.delivery_code,
+      d.customer_id,
+      c.name AS customer_name,
+      c.address AS customer_address,
+      c.area AS customer_area,
+      d.worker_id,
+      e.name AS worker_name,
+      d.status,
+      d.total_amount,
+      d.wallet_deduction,
+      d.amount_due,
+      d.payment_status,
+      d.delivery_date,
+      d.delivery_time,
+      d.period_start_date,
+      d.period_end_date,
+      d.advance_amount,
+      d.notes,
+      d.created_at,
+      di.product_id,
+      p.name AS product_name,
+      di.quantity,
+      di.unit_price,
+      di.total AS item_total
+     FROM deliveries d
+     INNER JOIN customers c ON c.id = d.customer_id
+     INNER JOIN employees e ON e.id = d.worker_id
+     LEFT JOIN delivery_items di ON di.delivery_id = d.id
+     LEFT JOIN products p ON p.id = di.product_id
+     WHERE d.customer_id = :customerId
+       AND d.worker_id = :workerId
+       AND d.status IN ('pending', 'assigned', 'in_progress')
+     ORDER BY d.delivery_date DESC, d.id DESC, di.id ASC`,
+    { customerId: cid, workerId: wid }
+  );
+  const deliveries = mapDeliveryRows(rows);
+  return deliveries[0] || null;
+}
+
+export async function completeDeliveryWithRuntime(deliveryId, payload) {
+  const id = Number(deliveryId);
+  if (!id) {
+    const err = new Error('Invalid delivery id');
+    err.status = 400;
+    throw err;
+  }
+
+  const paymentReceivedAmount = Math.max(0, Number(payload.paymentReceivedAmount) || 0);
+  const paymentMethod = payload.paymentMethod || 'cash';
+  const extraItems = Array.isArray(payload.extraItems) ? payload.extraItems : [];
+  const normalizedExtras = extraItems
+    .map((i) => ({
+      productId: Number(i.productId),
+      quantity: Math.max(1, Number(i.quantity) || 1),
+      unitPrice: Number(i.unitPrice) >= 0 ? Number(i.unitPrice) : null,
+    }))
+    .filter((i) => i.productId > 0 && i.quantity > 0);
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [deliveryRows] = await conn.query(
+      `SELECT id, delivery_code, customer_id, worker_id, status, wallet_deduction, notes
+       FROM deliveries
+       WHERE id = :id
+       LIMIT 1`,
+      { id }
+    );
+    if (!deliveryRows.length) {
+      const err = new Error('Delivery not found');
+      err.status = 404;
+      throw err;
+    }
+    const delivery = deliveryRows[0];
+    if (!['pending', 'assigned', 'in_progress'].includes(String(delivery.status))) {
+      const err = new Error('Only assigned/in-progress deliveries can be completed');
+      err.status = 400;
+      throw err;
+    }
+
+    const [baseItemRows] = await conn.query(
+      `SELECT di.product_id, di.quantity, di.unit_price, di.total
+       FROM delivery_items di
+       WHERE di.delivery_id = :deliveryId
+       ORDER BY di.id ASC`,
+      { deliveryId: id }
+    );
+    if (!baseItemRows.length) {
+      const err = new Error('Delivery has no assigned items');
+      err.status = 400;
+      throw err;
+    }
+
+    const baseTotal = baseItemRows.reduce((sum, row) => sum + Number(row.total || 0), 0);
+    let extraTotal = 0;
+
+    if (normalizedExtras.length) {
+      const ids = normalizedExtras.map((i) => i.productId);
+      const [productRows] = await conn.query(
+        `SELECT id, name, default_price, inventory_item_id
+         FROM products
+         WHERE id IN (${ids.map(() => '?').join(',')}) AND status = 'active'`,
+        ids
+      );
+      const productMap = new Map(productRows.map((p) => [Number(p.id), p]));
+      if (productMap.size !== normalizedExtras.length) {
+        const err = new Error('One or more extra products are invalid/inactive');
+        err.status = 400;
+        throw err;
+      }
+
+      for (const item of normalizedExtras) {
+        const product = productMap.get(item.productId);
+        const unitPrice = item.unitPrice === null ? Number(product.default_price || 0) : item.unitPrice;
+        const lineTotal = Number((unitPrice * item.quantity).toFixed(2));
+        extraTotal += lineTotal;
+
+        await conn.query(
+          `INSERT INTO delivery_items (delivery_id, product_id, quantity, unit_price, total)
+           VALUES (:deliveryId, :productId, :quantity, :unitPrice, :total)`,
+          {
+            deliveryId: id,
+            productId: item.productId,
+            quantity: item.quantity,
+            unitPrice,
+            total: lineTotal,
+          }
+        );
+
+        const inventoryItemId = Number(product.inventory_item_id || 0);
+        if (!inventoryItemId) {
+          const err = new Error(`Product ${product.name} is not linked with inventory`);
+          err.status = 400;
+          throw err;
+        }
+        const [invRows] = await conn.query(
+          `SELECT id, current_stock FROM inventory_items WHERE id = :id AND status = 'active' LIMIT 1`,
+          { id: inventoryItemId }
+        );
+        if (!invRows.length) {
+          const err = new Error(`Inventory item missing for ${product.name}`);
+          err.status = 400;
+          throw err;
+        }
+        const currentStock = Number(invRows[0].current_stock || 0);
+        const nextStock = currentStock - item.quantity;
+        if (nextStock < 0) {
+          const err = new Error(`Insufficient inventory for ${product.name}`);
+          err.status = 400;
+          throw err;
+        }
+        await conn.query(`UPDATE inventory_items SET current_stock = :nextStock WHERE id = :id`, {
+          id: inventoryItemId,
+          nextStock,
+        });
+        await conn.query(
+          `INSERT INTO inventory_transactions (inventory_item_id, type, quantity, notes, balance_after)
+           VALUES (:inventoryItemId, 'stock_out', :quantity, :notes, :balanceAfter)`,
+          {
+            inventoryItemId,
+            quantity: item.quantity,
+            notes: `Runtime extra item on delivery ${delivery.delivery_code || `D-${String(id).padStart(6, '0')}`}`,
+            balanceAfter: nextStock,
+          }
+        );
+      }
+    }
+
+    const totalAmount = Number((baseTotal + extraTotal).toFixed(2));
+    const walletDeduction = Number(delivery.wallet_deduction || 0);
+    const baseDue = Number(Math.max(0, totalAmount - walletDeduction).toFixed(2));
+    const amountDue = Number(Math.max(0, baseDue - paymentReceivedAmount).toFixed(2));
+    const paymentStatus = amountDue <= 0 ? 'paid' : paymentReceivedAmount > 0 || walletDeduction > 0 ? 'partial' : 'unpaid';
+    const status = amountDue <= 0 ? 'delivered' : 'partially_delivered';
+
+    if (paymentReceivedAmount > 0) {
+      await conn.query(
+        `INSERT INTO payments (
+           customer_id, amount, method, reference_id, notes, applied_to_wallet
+         ) VALUES (
+           :customerId, :amount, :method, :referenceId, :notes, 0
+         )`,
+        {
+          customerId: Number(delivery.customer_id),
+          amount: paymentReceivedAmount,
+          method: paymentMethod,
+          referenceId: payload.referenceId?.trim() || null,
+          notes: payload.paymentNotes?.trim() || `Collected at delivery ${delivery.delivery_code || `D-${String(id).padStart(6, '0')}`}`,
+        }
+      );
+    }
+
+    await conn.query(
+      `UPDATE deliveries
+       SET total_amount = :totalAmount,
+           amount_due = :amountDue,
+           payment_status = :paymentStatus,
+           status = :status,
+           notes = :notes
+       WHERE id = :id`,
+      {
+        id,
+        totalAmount,
+        amountDue,
+        paymentStatus,
+        status,
+        notes: payload.notes ? String(payload.notes).trim() : delivery.notes,
+      }
+    );
+
+    await conn.commit();
+    const data = await listDeliveries();
+    return data.find((d) => Number(d.dbId) === id) || null;
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+}

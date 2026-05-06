@@ -424,6 +424,80 @@ export async function getReportsCharts({ from, to } = {}) {
   };
 }
 
+export async function getInactiveCustomersReport({ from, to, walkInGapDays } = {}) {
+  const now = new Date();
+  const monthStart = (from && from.length >= 7) ? `${from.slice(0, 7)}-01` : `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+  const prevMonthDate = new Date(`${monthStart}T00:00:00`);
+  prevMonthDate.setMonth(prevMonthDate.getMonth() - 1);
+  const prevMonth = `${prevMonthDate.getFullYear()}-${String(prevMonthDate.getMonth() + 1).padStart(2, '0')}`;
+  const currentMonth = monthStart.slice(0, 7);
+  const gapDays = Math.max(1, Number(walkInGapDays) || 10);
+
+  const [inactiveRows] = await pool.query(
+    `SELECT
+       c.id,
+       c.customer_id,
+       c.name,
+       c.phone,
+       c.area,
+       MAX(prev.delivery_date) AS last_order_date
+     FROM customers c
+     INNER JOIN deliveries prev
+       ON prev.customer_id = c.id
+      AND prev.status IN ('delivered', 'partially_delivered')
+      AND DATE_FORMAT(prev.delivery_date, '%Y-%m') = :prevMonth
+     LEFT JOIN deliveries curr
+       ON curr.customer_id = c.id
+      AND curr.status IN ('delivered', 'partially_delivered')
+      AND DATE_FORMAT(curr.delivery_date, '%Y-%m') = :currentMonth
+     WHERE curr.id IS NULL
+     GROUP BY c.id, c.customer_id, c.name, c.phone, c.area
+     ORDER BY last_order_date DESC, c.name ASC`,
+    { prevMonth, currentMonth }
+  );
+
+  const [walkInRows] = await pool.query(
+    `SELECT
+       COALESCE(walk_in_name, 'Walk-in Customer') AS walk_in_name,
+       MIN(DATE(created_at)) AS first_seen,
+       MAX(DATE(created_at)) AS last_seen,
+       COUNT(DISTINCT DATE(created_at)) AS active_days,
+       SUM(amount) AS total_amount,
+       DATEDIFF(CURDATE(), MAX(DATE(created_at))) AS days_since_last
+     FROM payments
+     WHERE customer_id IS NULL
+       AND walk_in_name IS NOT NULL
+       AND TRIM(walk_in_name) <> ''
+       ${to ? 'AND DATE(created_at) <= :to' : ''}
+       ${from ? 'AND DATE(created_at) >= :from' : ''}
+     GROUP BY COALESCE(walk_in_name, 'Walk-in Customer')
+     HAVING active_days BETWEEN 1 AND :gapDays
+        AND days_since_last >= :gapDays
+     ORDER BY days_since_last DESC, total_amount DESC`,
+    { gapDays, ...(from ? { from } : {}), ...(to ? { to } : {}) }
+  );
+
+  return {
+    period: { previousMonth: prevMonth, currentMonth },
+    inactiveRegisteredCustomers: inactiveRows.map((row) => ({
+      id: String(row.id),
+      customerId: row.customer_id,
+      name: row.name,
+      phone: row.phone || '',
+      area: row.area || '',
+      lastOrderDate: formatDate(row.last_order_date),
+    })),
+    inactiveWalkIns: walkInRows.map((row) => ({
+      name: row.walk_in_name,
+      firstSeen: formatDate(row.first_seen),
+      lastSeen: formatDate(row.last_seen),
+      activeDays: Number(row.active_days || 0),
+      totalAmount: Number(row.total_amount || 0),
+      daysSinceLast: Number(row.days_since_last || 0),
+    })),
+  };
+}
+
 /**
  * Admin home dashboard: KPIs for today + month, lists, inventory alert count.
  */
