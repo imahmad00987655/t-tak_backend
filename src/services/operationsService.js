@@ -679,7 +679,7 @@ export async function getAdminDashboard() {
   const lowStockItems = Number(lowStockRows[0].c || 0);
 
   const [todayDelRows] = await pool.query(
-    `SELECT status, total_amount
+    `SELECT status, total_amount, advance_amount, wallet_deduction, amount_due
      FROM deliveries
      WHERE delivery_date = CURDATE()`
   );
@@ -692,9 +692,34 @@ export async function getAdminDashboard() {
   ).length;
   const inProgressDeliveries = todayDelRows.filter((d) => d.status === 'in_progress').length;
   const failedDeliveries = todayDelRows.filter((d) => d.status === 'failed').length;
-  const todayRevenue = todayDelRows
-    .filter((d) => ['delivered', 'partially_delivered'].includes(d.status))
-    .reduce((sum, d) => sum + Number(d.total_amount || 0), 0);
+  const completedToday = todayDelRows.filter((d) =>
+    ['delivered', 'partially_delivered'].includes(d.status)
+  );
+  const todayRevenue = completedToday.reduce((sum, d) => sum + Number(d.total_amount || 0), 0);
+  const todayAdvanceCollected = todayDelRows.reduce(
+    (sum, d) => sum + Number(d.advance_amount || 0),
+    0
+  );
+  const todayWalletDeduction = todayDelRows.reduce(
+    (sum, d) => sum + Number(d.wallet_deduction || 0),
+    0
+  );
+  const todayOutstanding = todayDelRows.reduce((sum, d) => sum + Number(d.amount_due || 0), 0);
+
+  // Cash/online collected at delivery time via worker runtime flow (recorded in payments table, not applied to wallet)
+  const [todayPaymentsAgg] = await pool.query(
+    `SELECT
+       COALESCE(SUM(CASE WHEN applied_to_wallet = 0 THEN amount ELSE 0 END), 0) AS delivery_collected,
+       COALESCE(SUM(CASE WHEN applied_to_wallet = 1 THEN amount ELSE 0 END), 0) AS wallet_recharge
+     FROM payments
+     WHERE DATE(created_at) = CURDATE()`
+  );
+  const todayDeliveryCollected = Number(todayPaymentsAgg[0]?.delivery_collected || 0);
+  const todayWalletRecharge = Number(todayPaymentsAgg[0]?.wallet_recharge || 0);
+  // Total real cash inflow today = advance taken at creation + runtime collections + new wallet recharges
+  const todayCashCollected = Number(
+    (todayAdvanceCollected + todayDeliveryCollected + todayWalletRecharge).toFixed(2)
+  );
 
   const [todayListRows] = await pool.query(
     `SELECT d.id, d.delivery_code, c.name AS customer_name, c.area, e.name AS worker_name,
@@ -739,6 +764,12 @@ export async function getAdminDashboard() {
       inProgressDeliveries,
       failedDeliveries,
       todayRevenue,
+      todayAdvanceCollected: Number(todayAdvanceCollected.toFixed(2)),
+      todayWalletDeduction: Number(todayWalletDeduction.toFixed(2)),
+      todayOutstanding: Number(todayOutstanding.toFixed(2)),
+      todayDeliveryCollected: Number(todayDeliveryCollected.toFixed(2)),
+      todayWalletRecharge: Number(todayWalletRecharge.toFixed(2)),
+      todayCashCollected,
       monthlyRevenue: reports.monthlyRevenue,
       outstandingDues: reports.outstandingDues,
       totalWalletBalance,
@@ -752,7 +783,7 @@ export async function getAdminDashboard() {
 export async function getDailyClosingSummary(targetDate) {
   const day = targetDate || new Date().toISOString().slice(0, 10);
   const [delRows] = await pool.query(
-    `SELECT status, total_amount
+    `SELECT status, total_amount, advance_amount, wallet_deduction, amount_due
      FROM deliveries
      WHERE delivery_date = :day`,
     { day }
@@ -761,6 +792,17 @@ export async function getDailyClosingSummary(targetDate) {
     `SELECT COALESCE(SUM(amount), 0) AS total_expenses
      FROM expenses
      WHERE expense_date = :day`,
+    { day }
+  );
+  const [paymentAgg] = await pool.query(
+    `SELECT
+       COALESCE(SUM(CASE WHEN applied_to_wallet = 0 THEN amount ELSE 0 END), 0) AS delivery_collected,
+       COALESCE(SUM(CASE WHEN applied_to_wallet = 1 THEN amount ELSE 0 END), 0) AS wallet_recharge,
+       COALESCE(SUM(CASE WHEN method = 'cash' THEN amount ELSE 0 END), 0) AS cash_total,
+       COALESCE(SUM(CASE WHEN method = 'online' THEN amount ELSE 0 END), 0) AS online_total,
+       COALESCE(SUM(CASE WHEN method = 'card' THEN amount ELSE 0 END), 0) AS card_total
+     FROM payments
+     WHERE DATE(created_at) = :day`,
     { day }
   );
   const [closedRows] = await pool.query(
@@ -774,9 +816,18 @@ export async function getDailyClosingSummary(targetDate) {
   const completed = delRows.filter((d) => ['delivered', 'partially_delivered'].includes(d.status)).length;
   const failed = delRows.filter((d) => d.status === 'failed').length;
   const pending = delRows.filter((d) => ['pending', 'assigned', 'in_progress'].includes(d.status)).length;
-  const revenue = delRows
-    .filter((d) => ['delivered', 'partially_delivered'].includes(d.status))
-    .reduce((s, d) => s + Number(d.total_amount), 0);
+  const completedRows = delRows.filter((d) =>
+    ['delivered', 'partially_delivered'].includes(d.status)
+  );
+  const revenue = completedRows.reduce((s, d) => s + Number(d.total_amount || 0), 0);
+  const advanceCollected = delRows.reduce((s, d) => s + Number(d.advance_amount || 0), 0);
+  const walletDeduction = delRows.reduce((s, d) => s + Number(d.wallet_deduction || 0), 0);
+  const outstanding = delRows.reduce((s, d) => s + Number(d.amount_due || 0), 0);
+  const deliveryCollected = Number(paymentAgg[0]?.delivery_collected || 0);
+  const walletRecharge = Number(paymentAgg[0]?.wallet_recharge || 0);
+  const cashCollected = Number(
+    (advanceCollected + deliveryCollected + walletRecharge).toFixed(2)
+  );
   const expenses = Number(expenseRows[0].total_expenses);
   return {
     date: day,
@@ -785,8 +836,19 @@ export async function getDailyClosingSummary(targetDate) {
     failed,
     pending,
     revenue,
+    advanceCollected: Number(advanceCollected.toFixed(2)),
+    walletDeduction: Number(walletDeduction.toFixed(2)),
+    outstanding: Number(outstanding.toFixed(2)),
+    deliveryCollected: Number(deliveryCollected.toFixed(2)),
+    walletRecharge: Number(walletRecharge.toFixed(2)),
+    cashCollected,
+    paymentBreakdown: {
+      cash: Number(paymentAgg[0]?.cash_total || 0),
+      online: Number(paymentAgg[0]?.online_total || 0),
+      card: Number(paymentAgg[0]?.card_total || 0),
+    },
     expenses,
-    net: revenue - expenses,
+    net: Number((revenue - expenses).toFixed(2)),
     isClosed: !!closedRows.length,
     closedRecord: closedRows[0]
       ? {
